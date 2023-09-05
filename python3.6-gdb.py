@@ -660,6 +660,37 @@ class PyCodeObjectPtr(PyObjectPtr):
             lineno += ord(line_incr)
         return lineno
 
+    @property
+    def filename(self):
+        return self.pyop_field('co_filename').proxyval(set())
+
+    @property
+    def lineno(self):
+        return int_from_int(self.field('co_firstlineno'))
+
+    def current_line(self):
+        filename = self.filename
+        lineno = self.lineno
+        try:
+            with open(os_fsencode(filename), 'r') as fp:
+                lines = fp.readlines()
+        except IOError:
+            return None
+        try:
+            # Convert from 1-based current_line_num to 0-based list offset
+            return lines[lineno - 1]
+        except IndexError:
+            return None
+
+    def print_traceback(self):
+        if self.is_optimized_out():
+            sys.stdout.write('  (frame information optimized out)\n')
+            return
+        sys.stdout.write('  File "%s", line %s, in %s\n'
+                  % (self.filename,
+                     self.lineno,
+                     self.pyop_field('co_name').proxyval(set())))
+
 
 class PyDictObjectPtr(PyObjectPtr):
     """
@@ -1216,6 +1247,8 @@ class PyUnicodeObjectPtr(PyObjectPtr):
         # Gather a list of ints from the Py_UNICODE array; these are either
         # UCS-1, UCS-2 or UCS-4 code points:
         if not may_have_surrogates:
+            if repr_kind == 1:
+                return field_str.string()
             Py_UNICODEs = [int(field_str[i]) for i in safe_range(field_length)]
         else:
             # A more elaborate routine if sizeof(Py_UNICODE) is 2 in the
@@ -1626,12 +1659,12 @@ class Frame(object):
             # because it was "optimized out". Try to get "f" from the frame
             # of the caller, PyEval_EvalCodeEx().
             orig_frame = frame
-            caller = self._gdbframe.older()
+            caller = self._gdbframe.older().older()
             if caller:
-                f = caller.read_var('f')
-                frame = PyFrameObjectPtr.from_pyobject_ptr(f)
-                if not frame.is_optimized_out():
-                    return frame
+                f = caller.read_var('_co')
+                code = PyCodeObjectPtr.from_pyobject_ptr(f)
+                if not code.is_optimized_out():
+                    return code
             return orig_frame
         except ValueError:
             return None
@@ -1890,7 +1923,10 @@ class PyBacktrace(gdb.Command):
         sys.stdout.write('Traceback (most recent call first):\n')
         while frame:
             if frame.is_python_frame():
-                frame.print_traceback()
+                try:
+                    frame.print_traceback()
+                except Exception:
+                    break
             frame = frame.older()
 
 PyBacktrace()
